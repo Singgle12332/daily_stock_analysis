@@ -69,9 +69,14 @@ class MarketOverview:
     total_amount: float = 0.0           # 两市成交额（亿元）
     north_flow: float = 0.0             # 北向资金净流入（亿元）
     
-    # 板块涨幅榜
-    top_sectors: List[Dict] = field(default_factory=list)     # 涨幅前5板块
-    bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
+    # 涨幅榜
+    top_risers: List[Dict] = field(default_factory=list)     # 涨幅前20名
+    bottom_risers: List[Dict] = field(default_factory=list)  # 跌幅前20名
+    
+    # 主力资金
+    main_fund_flow: float = 0.0         # 主力净流入（亿元）
+    main_inflow_stocks: List[Dict] = field(default_factory=list)   # 流入前10名
+    main_outflow_stocks: List[Dict] = field(default_factory=list)  # 流出前10名
 
 
 class MarketAnalyzer:
@@ -204,6 +209,47 @@ class MarketAnalyzer:
                     df[amount_col] = pd.to_numeric(df[amount_col], errors='coerce')
                     overview.total_amount = df[amount_col].sum() / 1e8  # 转为亿元
                 
+                # 主力资金流入统计
+                logger.info("[大盘] 获取主力资金流向...")
+                try:
+                    # 获取个股资金流向数据
+                    fund_df = ak.stock_individual_fund_flow_rank_em(indicator="今日")
+                    
+                    if fund_df is not None and not fund_df.empty:
+                        # 统计主力净流入
+                        net_flow_col = '净流入'
+                        if net_flow_col in fund_df.columns:
+                            fund_df[net_flow_col] = pd.to_numeric(fund_df[net_flow_col], errors='coerce')
+                            
+                            # 计算主力资金流入统计
+                            inflow_stocks = len(fund_df[fund_df[net_flow_col] > 0])  # 净流入为正的股票数
+                            outflow_stocks = len(fund_df[fund_df[net_flow_col] < 0])  # 净流入为负的股票数
+                            total_net_flow = fund_df[net_flow_col].sum() / 1e8  # 转为亿元
+                            
+                            logger.info(f"[大盘] 主力流入股票: {inflow_stocks}家, 流出股票: {outflow_stocks}家, 净流入: {total_net_flow:.2f}亿")
+                            
+                            # 获取流入最多的前10只股票
+                            top_inflow = fund_df.nlargest(10, net_flow_col)
+                            top_inflow_stocks = [
+                                {'name': row['名称'], 'net_flow': row[net_flow_col] / 1e8}
+                                for _, row in top_inflow.iterrows()
+                            ]
+                            
+                            # 获取流出最多的前10只股票
+                            top_outflow = fund_df.nsmallest(10, net_flow_col)
+                            top_outflow_stocks = [
+                                {'name': row['名称'], 'net_flow': row[net_flow_col] / 1e8}
+                                for _, row in top_outflow.iterrows()
+                            ]
+                            
+                            # 存储到overview
+                            overview.main_inflow_stocks = top_inflow_stocks
+                            overview.main_outflow_stocks = top_outflow_stocks
+                            overview.main_fund_flow = total_net_flow
+                            
+                except Exception as e:
+                    logger.warning(f"[大盘] 获取主力资金流向失败: {e}")
+                
                 logger.info(f"[大盘] 涨:{overview.up_count} 跌:{overview.down_count} 平:{overview.flat_count} "
                           f"涨停:{overview.limit_up_count} 跌停:{overview.limit_down_count} "
                           f"成交额:{overview.total_amount:.0f}亿")
@@ -212,9 +258,9 @@ class MarketAnalyzer:
             logger.error(f"[大盘] 获取涨跌统计失败: {e}")
     
     def _get_sector_rankings(self, overview: MarketOverview):
-        """获取板块涨跌榜"""
+        """获取板块涨跌榜和个股涨幅榜"""
         try:
-            logger.info("[大盘] 获取板块涨跌榜...")
+            logger.info("[大盘] 获取板块涨跌榜和个股涨幅榜...")
             
             # 获取行业板块行情
             df = ak.stock_board_industry_name_em()
@@ -225,22 +271,36 @@ class MarketAnalyzer:
                     df[change_col] = pd.to_numeric(df[change_col], errors='coerce')
                     df = df.dropna(subset=[change_col])
                     
-                    # 涨幅前5
-                    top = df.nlargest(5, change_col)
-                    overview.top_sectors = [
+                    # 涨幅榜 - 前20名
+                    top = df.nlargest(20, change_col)
+                    overview.top_risers = [
                         {'name': row['板块名称'], 'change_pct': row[change_col]}
                         for _, row in top.iterrows()
                     ]
                     
-                    # 跌幅前5
-                    bottom = df.nsmallest(5, change_col)
-                    overview.bottom_sectors = [
+                    # 跌幅榜 - 前20名
+                    bottom = df.nsmallest(20, change_col)
+                    overview.bottom_risers = [
                         {'name': row['板块名称'], 'change_pct': row[change_col]}
                         for _, row in bottom.iterrows()
                     ]
                     
-                    logger.info(f"[大盘] 领涨板块: {[s['name'] for s in overview.top_sectors]}")
-                    logger.info(f"[大盘] 领跌板块: {[s['name'] for s in overview.bottom_sectors]}")
+                    # 板块涨幅榜 - 领涨前5
+                    top_5 = df.nlargest(5, change_col)
+                    overview.top_sectors = [
+                        {'name': row['板块名称'], 'change_pct': row[change_col]}
+                        for _, row in top_5.iterrows()
+                    ]
+                    
+                    # 板块跌幅榜 - 领跌前5
+                    bottom_5 = df.nsmallest(5, change_col)
+                    overview.bottom_sectors = [
+                        {'name': row['板块名称'], 'change_pct': row[change_col]}
+                        for _, row in bottom_5.iterrows()
+                    ]
+                    
+                    logger.info(f"[大盘] 涨幅榜: {[s['name'] for s in overview.top_risers[:5]]}")
+                    logger.info(f"[大盘] 跌幅榜: {[s['name'] for s in overview.bottom_risers[:5]]}")
                     
         except Exception as e:
             logger.error(f"[大盘] 获取板块涨跌榜失败: {e}")
@@ -468,8 +528,16 @@ class MarketAnalyzer:
             indices_text += f"- **{idx.name}**: {idx.current:.2f} ({direction}{abs(idx.change_pct):.2f}%)\n"
         
         # 板块信息
-        top_text = "、".join([s['name'] for s in overview.top_sectors[:3]])
-        bottom_text = "、".join([s['name'] for s in overview.bottom_sectors[:3]])
+        top_text = "、".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.top_risers[:5]])
+        bottom_text = "、".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.bottom_risers[:5]])
+        
+        # 涨幅榜
+        top_risers_text = "\n".join([f"{i+1}. {s['name']}({s['change_pct']:+.2f}%)" for i, s in enumerate(overview.top_risers[:20])])
+        bottom_risers_text = "\n".join([f"{i+1}. {s['name']}({s['change_pct']:+.2f}%)" for i, s in enumerate(overview.bottom_risers[:20])])
+        
+        # 主力资金流向
+        inflow_text = "\n".join([f"{i+1}. {s['name']}({s['net_flow']:+.2f}亿)" for i, s in enumerate(overview.main_inflow_stocks[:10])])
+        outflow_text = "\n".join([f"{i+1}. {s['name']}({s['net_flow']:+.2f}亿)" for i, s in enumerate(overview.main_outflow_stocks[:10])])
         
         report = f"""## 📊 {overview.date} 大盘复盘
 
@@ -484,17 +552,37 @@ class MarketAnalyzer:
 |------|------|
 | 上涨家数 | {overview.up_count} |
 | 下跌家数 | {overview.down_count} |
+| 平盘家数 | {overview.flat_count} |
 | 涨停 | {overview.limit_up_count} |
 | 跌停 | {overview.limit_down_count} |
 | 两市成交额 | {overview.total_amount:.0f}亿 |
 | 北向资金 | {overview.north_flow:+.2f}亿 |
+| 主力净流入 | {overview.main_fund_flow:+.2f}亿 |
+| 主力流入股票 | {len(overview.main_inflow_stocks)}家 |
+| 主力流出股票 | {len(overview.main_outflow_stocks)}家 |
 
 ### 四、板块表现
 - **领涨**: {top_text}
 - **领跌**: {bottom_text}
 
-### 五、风险提示
-市场有风险，投资需谨慎。以上数据仅供参考，不构成投资建议。
+### 五、主力资金动向
+**主力净流入**: {overview.main_fund_flow:+.2f}亿元
+**主力流入股票**: {len(overview.main_inflow_stocks)}家
+**主力流出股票**: {len(overview.main_outflow_stocks)}家
+**流入榜前5名**:
+{inflow_text}
+**流出榜前5名**:
+{outflow_text}
+
+### 六、个股涨幅榜
+**涨幅榜前20名：**
+{top_risers_text}
+
+**跌幅榜前20名：**
+{bottom_risers_text}
+
+### 七、市场新闻
+{news_text if news_text else "暂无相关新闻"}
 
 ---
 *复盘时间: {datetime.now().strftime('%H:%M')}*
